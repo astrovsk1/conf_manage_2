@@ -1,18 +1,19 @@
 import csv
-import os
+import collections
 import sys
-import urllib.request as req
+from typing import Dict, List
 
 
 class Config:
     def __init__(self):
-        for field in ['package_name', 'repository_url', 'package_version',
-                      'output_filename', 'package_filter']:
-            setattr(self, field, "")
-        for field in ['test_repo_mode', 'ascii_tree_mode']:
-            setattr(self, field, False)
-        self.max_depth = 10
+        self.package_name = ""
+        self.repository_url = ""
+        self.package_version = ""
         self.output_filename = "graph.png"
+        self.package_filter = ""
+        self.test_repo_mode = False
+        self.ascii_tree_mode = False
+        self.max_depth = 10
 
     def load_from_csv(self, config_file):
         with open(config_file, 'r') as f:
@@ -28,49 +29,92 @@ class Config:
         elif param == 'max_depth':
             self.max_depth = max(1, min(100, int(val)))
         elif hasattr(self, param):
-            setattr(self, param, val or getattr(self, param))
+            setattr(self, param, val)
 
 
-class DependencyResolver:
+class DependencyGraph:
     def __init__(self, config):
         self.config = config
+        self.graph = {}
 
-    def get_dependencies(self):
-        return self._get_local_deps() if self.config.test_repo_mode else self._get_remote_deps()
+    def build_graph(self):
+        queue = collections.deque([(self.config.package_name, 0)])
+        visited = set([self.config.package_name])
+        self.graph = {}
 
-    def _get_local_deps(self):
-        cargo_path = os.path.join(self.config.repository_url, "Cargo.toml")
-        if not os.path.exists(cargo_path):
-            raise Exception("Cargo.toml not found")
-        return self._parse_deps(cargo_path)
+        while queue:
+            package, depth = queue.popleft()
+            deps = self._get_deps(package)
 
-    def _get_remote_deps(self):
-        deps_map = {
-            "serde": ["serde_derive", "proc-macro2", "quote", "syn"],
-            "tokio": ["bytes", "mio", "num_cpus", "pin-project-lite"],
-            "reqwest": ["bytes", "http", "hyper", "serde", "serde_json"]
-        }
-        return deps_map.get(self.config.package_name, [f"dep_{i}" for i in range(3)])
+            filtered_deps = [d for d in deps if not self.config.package_filter or self.config.package_filter not in d]
+            self.graph[package] = filtered_deps
 
-    def _parse_deps(self, file_path):
-        deps, in_deps = [], False
-        with open(file_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('['):
-                    in_deps = line == '[dependencies]'
-                elif in_deps and line and '=' in line and not line.startswith('#'):
-                    deps.append(line.split('=')[0].strip())
+            if depth + 1 < self.config.max_depth:
+                for dep in filtered_deps:
+                    if dep not in visited:
+                        visited.add(dep)
+                        queue.append((dep, depth + 1))
+
+        return self.graph
+
+    def _get_deps(self, package):
+        if self.config.test_repo_mode:
+            return self._get_test_deps(package)
+        return self._get_remote_deps(package)
+
+    def _get_test_deps(self, package):
+        deps = []
+        current_section = None
+
+        try:
+            with open(self.config.repository_url, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('[') and line.endswith(']'):
+                        current_section = line[1:-1].strip()
+                    elif current_section == package and '=' in line and not line.startswith('#'):
+                        deps.append(line.split('=')[0].strip())
+        except:
+            pass
+
         return deps
 
-    def print_dependencies(self, dependencies):
-        print(f"\nЗависимости {self.config.package_name} {self.config.package_version}:")
+    def _get_remote_deps(self, package):
+        deps_db = {
+            "serde": ["serde_derive", "proc-macro2"],
+            "serde_derive": ["proc-macro2", "quote", "syn"],
+            "proc-macro2": ["unicode-ident"],
+            "quote": ["proc-macro2"],
+            "syn": ["proc-macro2", "quote", "unicode-ident"],
+            "unicode-ident": [],
+            "tokio": ["bytes", "mio", "num_cpus"],
+            "bytes": [],
+            "mio": ["libc"],
+            "num_cpus": [],
+            "libc": [],
+            "reqwest": ["bytes", "hyper", "serde", "tokio"],
+            "hyper": ["bytes", "tokio"]
+        }
+        return deps_db.get(package, [])
+
+    def print_simple_tree(self):
+        if not self.config.ascii_tree_mode:
+            return
+
+        print(f"\nDependency Tree for {self.config.package_name}:")
         print("=" * 40)
-        filtered = [d for d in dependencies if
-                    self.config.package_filter in d] if self.config.package_filter else dependencies
-        for i, dep in enumerate(filtered, 1):
-            print(f"{i:2}. {dep}")
-        print(f"Всего: {len(filtered)}")
+
+        def _print(node, indent=0, depth=0):
+            if depth > self.config.max_depth:
+                return
+
+            print("  " * indent + node)
+
+            if node in self.graph and depth < self.config.max_depth:
+                for child in self.graph[node]:
+                    _print(child, indent + 1, depth + 1)
+
+        _print(self.config.package_name, 0, 0)
 
 
 def main():
@@ -85,10 +129,18 @@ def main():
         for k, v in config.__dict__.items():
             print(f"{k:20}: {v}")
 
-        deps = DependencyResolver(config).get_dependencies()
-        DependencyResolver(config).print_dependencies(deps)
+        graph_builder = DependencyGraph(config)
+        dependency_graph = graph_builder.build_graph()
+
+        print(f"\nDependency Graph ({len(dependency_graph)} packages):")
+        for pkg, deps in dependency_graph.items():
+            if deps:
+                print(f"{pkg:15} -> {deps}")
+
+        graph_builder.print_simple_tree()
+
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"Error: {e}")
 
 
 if __name__ == '__main__':
