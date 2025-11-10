@@ -6,11 +6,13 @@ import sys
 class Config:
     def __init__(self):
         self.package_name = "serde"
+        self.package_version = "1.0"
         self.repository_url = ""
         self.test_repo_mode = False
         self.ascii_tree_mode = False
         self.max_depth = 3
         self.package_filter = ""
+        self.output_filename = "graph.png"
 
     def load_from_csv(self, config_file):
         with open(config_file, 'r') as f:
@@ -32,22 +34,54 @@ class DependencyGraph:
     def __init__(self, config):
         self.config = config
         self.graph = {}
+        self.cycles = []
+
+    def get_direct_dependencies(self):
+        package = self.config.package_name.upper() if self.config.test_repo_mode else self.config.package_name
+        deps = self._get_deps(package)
+        print(f"\nПрямые зависимости:")
+        print(f"Пакет: {package} (версия: {self.config.package_version})")
+        print(f"Прямые зависимости ({len(deps)}): {deps}")
+        return deps
 
     def build_graph(self):
-        start_package = self.config.package_name.upper().strip() if self.config.test_repo_mode else self.config.package_name.strip()
+        start_package = self.config.package_name.upper() if self.config.test_repo_mode else self.config.package_name
 
-        queue = collections.deque([(start_package, 0)])
+        queue = collections.deque([(start_package, 0, [])])
         visited = set([start_package])
         self.graph = {}
+        self.cycles = []
 
         while queue:
-            package, depth = queue.popleft()
-            deps = self._get_deps(package)
+            package, depth, path = queue.popleft()
 
-            if self.config.package_filter:
-                filtered_deps = [d for d in deps if self.config.package_filter not in d]
-            else:
-                filtered_deps = deps
+            current_path = path + [package]
+
+            # Проверяем циклы в текущем пути
+            if package in path:
+                cycle_path = path[path.index(package):] + [package]
+                cycle_str = " -> ".join(cycle_path)
+                if cycle_str not in self.cycles:
+                    self.cycles.append(cycle_str)
+                # Пропускаем обработку зависимостей для циклического узла
+                if package not in self.graph:
+                    self.graph[package] = []
+                continue
+
+            deps = self._get_deps(package)
+            filtered_deps = []
+
+            for dep in deps:
+                # Проверяем, создает ли зависимость цикл
+                if dep in current_path:
+                    cycle_path = current_path + [dep]
+                    cycle_str = " -> ".join(cycle_path)
+                    if cycle_str not in self.cycles:
+                        self.cycles.append(cycle_str)
+                else:
+                    # Применяем фильтр
+                    if not self.config.package_filter or self.config.package_filter not in dep:
+                        filtered_deps.append(dep)
 
             self.graph[package] = filtered_deps
 
@@ -55,26 +89,23 @@ class DependencyGraph:
                 for dep in filtered_deps:
                     if dep not in visited:
                         visited.add(dep)
-                        queue.append((dep, depth + 1))
+                        queue.append((dep, depth + 1, current_path))
+
         return self.graph
 
     def _get_deps(self, package):
         if self.config.test_repo_mode:
             test_deps = {
-                "A": ["B", "C"],
-                "B": ["D", "E"],
-                "C": ["F"],
-                "D": ["G"],
-                "E": ["G"],
-                "F": ["H"],
-                "G": [],
-                "H": []
+                "A": ["B", "C"], "B": ["D", "E"], "C": ["F", "A"],
+                "D": ["G"], "E": ["G", "B"], "F": ["H", "A"],
+                "G": [], "H": []
             }
             return test_deps.get(package, [])
         else:
             real_deps = {
                 "serde": ["serde_derive", "proc-macro2"],
                 "serde_derive": ["proc-macro2", "quote", "syn"],
+                "proc-macro2": [], "quote": [], "syn": []
             }
             return real_deps.get(package, [])
 
@@ -82,17 +113,29 @@ class DependencyGraph:
         if not self.config.ascii_tree_mode:
             return
 
-        print(f"\nTree for {self.config.package_name}:")
+        print(f"\nASCII-ДЕРЕВО")
+        start = self.config.package_name.upper() if self.config.test_repo_mode else self.config.package_name
 
-        def _print(node, indent=0, depth=0):
-            if depth > self.config.max_depth:
+        def _print(node, indent=0, depth=0, visited=None):
+            if visited is None:
+                visited = set()
+            if depth > self.config.max_depth or node in visited:
                 return
+            visited.add(node)
             print("  " * indent + node)
             for child in self.graph.get(node, []):
-                _print(child, indent + 1, depth + 1)
+                _print(child, indent + 1, depth + 1, visited.copy())
 
-        start_node = self.config.package_name.upper().strip() if self.config.test_repo_mode else self.config.package_name.strip()
-        _print(start_node)
+        _print(start)
+
+    def print_statistics(self):
+        print(f"\nВывод:")
+        print(f"Всего пакетов: {len(self.graph)}")
+        print(f"Всего зависимостей: {sum(len(deps) for deps in self.graph.values())}")
+        print(f"Обнаружено циклов: {len(self.cycles)}")
+        if self.cycles:
+            for cycle in self.cycles:
+                print(f"  - {cycle}")
 
 
 def main():
@@ -103,19 +146,23 @@ def main():
     config = Config()
     config.load_from_csv(sys.argv[1])
 
-    print("Configuration:")
-    print(f"package_name: '{config.package_name}'")
-    print(f"test_repo_mode: {config.test_repo_mode}")
-    print(f"max_depth: {config.max_depth}")
+    print("Конфигурация:")
+    for attr in ['package_name', 'package_version', 'repository_url', 'test_repo_mode',
+                 'ascii_tree_mode', 'max_depth', 'package_filter', 'output_filename']:
+        print(f"{attr}: {getattr(config, attr)}")
 
     graph = DependencyGraph(config)
+
+    graph.get_direct_dependencies()
+
     dependency_graph = graph.build_graph()
 
-    print(f"\nGraph ({len(dependency_graph)} packages):")
+    print(f"\nГраф зависимостей:")
     for pkg, deps in dependency_graph.items():
         print(f"{pkg} -> {deps}")
 
     graph.print_tree()
+    graph.print_statistics()
 
 
 if __name__ == '__main__':
