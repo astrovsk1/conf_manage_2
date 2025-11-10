@@ -1,7 +1,10 @@
 import csv
 import collections
 import sys
+import graphviz
+import os
 
+os.environ["PATH"] += os.pathsep + 'C:/Program Files/Graphviz/bin/'
 
 class Config:
     def __init__(self):
@@ -13,14 +16,14 @@ class Config:
         self.max_depth = 3
         self.package_filter = ""
         self.output_filename = "graph.png"
-        self.show_load_order = False
+        self.generate_image = False
 
     def load_from_csv(self, config_file):
         with open(config_file, 'r') as f:
             for row in csv.DictReader(f):
                 param = row.get('parameter', '').lower()
                 val = row.get('value', '').strip()
-                if param in ['test_repo_mode', 'ascii_tree_mode', 'show_load_order']:
+                if param in ['test_repo_mode', 'ascii_tree_mode', 'generate_image']:
                     setattr(self, param, val.lower() in ['true', '1', 'yes'])
                 elif param == 'max_depth':
                     try:
@@ -36,13 +39,6 @@ class DependencyGraph:
         self.config = config
         self.graph = {}
         self.cycles = []
-
-    def get_direct_dependencies(self):
-        package = self.config.package_name.upper() if self.config.test_repo_mode else self.config.package_name
-        deps = self._get_deps(package)
-        print(f"Пакет: {package} (версия: {self.config.package_version})")
-        print(f"Прямые зависимости: {deps}")
-        return deps
 
     def build_graph(self):
         start_package = self.config.package_name.upper() if self.config.test_repo_mode else self.config.package_name
@@ -121,34 +117,60 @@ class DependencyGraph:
 
         _print(start)
 
-    def print_statistics(self):
-        print(f"Всего пакетов: {len(self.graph)}")
-        print(f"Всего зависимостей: {sum(len(deps) for deps in self.graph.values())}")
-        print(f"Обнаружено циклов: {len(self.cycles)}")
-        for cycle in self.cycles:
-            print(f"  - {cycle}")
-
-    def calculate_load_order(self):
-        if not self.config.show_load_order:
+    def generate_graphviz(self):
+        if not self.config.generate_image:
             return
 
-        visited = set()
-        stack = []
+        try:
+            # Пробуем найти Graphviz в стандартных путях
+            import os
+            possible_paths = [
+                'C:/Program Files/Graphviz/bin/',
+                'C:/Program Files (x86)/Graphviz/bin/',
+                'D:/Program Files/Graphviz/bin/'
+            ]
 
-        def dfs(node):
-            if node in visited:
-                return
-            visited.add(node)
-            for neighbor in self.graph.get(node, []):
-                dfs(neighbor)
-            stack.append(node)
+            for path in possible_paths:
+                if os.path.exists(path):
+                    os.environ["PATH"] += os.pathsep + path
+                    break
 
-        start_node = self.config.package_name.upper() if self.config.test_repo_mode else self.config.package_name
-        dfs(start_node)
+            dot = graphviz.Digraph(comment='Dependency Graph')
 
-        print(f"Порядок загрузки:")
-        for i, package in enumerate(stack, 1):
-            print(f"  {i}. {package}")
+            for package in self.graph:
+                dot.node(package)
+
+            for package, deps in self.graph.items():
+                for dep in deps:
+                    dot.edge(package, dep)
+
+            dot.render(self.config.output_filename, format='png', cleanup=True)
+            print(f"Граф сохранен в файл: {self.config.output_filename}")
+
+        except Exception as e:
+            print(f"Graphviz не доступен: {e}")
+            print("Создаю текстовый файл с описанием графа...")
+
+            dot_content = "digraph G {\n"
+            for package, deps in self.graph.items():
+                for dep in deps:
+                    dot_content += f'  "{package}" -> "{dep}";\n'
+            dot_content += "}"
+
+            dot_filename = self.config.output_filename.replace('.png', '.dot')
+            with open(dot_filename, 'w') as f:
+                f.write(dot_content)
+
+            print(f"Файл Graphviz сохранен: {dot_filename}")
+            print("Установите Graphviz с https://graphviz.org/download/")
+
+    def print_graphviz_text(self):
+        print("Graphviz представление:")
+        print("digraph G {")
+        for package, deps in self.graph.items():
+            for dep in deps:
+                print(f'  "{package}" -> "{dep}";')
+        print("}")
 
 
 def main():
@@ -161,14 +183,10 @@ def main():
 
     print("Конфигурация:")
     for attr in ['package_name', 'package_version', 'repository_url', 'test_repo_mode',
-                 'ascii_tree_mode', 'max_depth', 'package_filter', 'output_filename', 'show_load_order']:
+                 'ascii_tree_mode', 'max_depth', 'package_filter', 'output_filename', 'generate_image']:
         print(f"{attr}: {getattr(config, attr)}")
 
     graph = DependencyGraph(config)
-
-    print("\nПрямые зависимости:")
-    graph.get_direct_dependencies()
-
     dependency_graph = graph.build_graph()
 
     print("\nГраф зависимостей:")
@@ -178,10 +196,8 @@ def main():
     print("\nASCII-ДЕРЕВО")
     graph.print_tree()
 
-    print("\nВывод:")
-    graph.print_statistics()
-
-    graph.calculate_load_order()
+    graph.print_graphviz_text()
+    graph.generate_graphviz()
 
 
 if __name__ == '__main__':
